@@ -61,6 +61,12 @@ RTG / riscv-dv
 | [riscv-dv](https://github.com/google/riscv-dv) | Sinh chương trình/instruction ngẫu nhiên |
 | [Spike](https://github.com/riscv-software-src/riscv-isa-sim) | Reference model độc lập cho RISC-V ISA |
 | [Sail RISC-V](https://github.com/riscv/sail-riscv) | Reference model dựa trên đặc tả RISC-V |
+| [riscv-arch-test](https://github.com/riscv-non-isa/riscv-arch-test) | Bộ compliance test có định hướng cho ISA |
+| [riscv-isac](https://github.com/riscv-software-src/riscv-isac) | Phân tích trace và đo coverage theo ISA |
+| [riscv-coverage](https://github.com/riscv-non-isa/riscv-coverage) | Coverage model cho RISC-V |
+| [riscv-formal](https://github.com/SymbioticEDA/riscv-formal) | Formal verification qua giao diện RVFI |
+| [cocotbext-axi](https://github.com/alexforencich/cocotbext-axi) | AXI driver/monitor và bus model cho Cocotb |
+| [verilog-axi](https://github.com/alexforencich/verilog-axi) | RTL AXI components, RAM, interconnect và testbench |
 
 ## 4. Vai trò của từng thành phần
 
@@ -121,6 +127,21 @@ RTG hoặc `riscv-dv` sinh stimulus:
 - Program và seed.
 
 RTG không phải reference model. Nó chỉ tạo chương trình hoặc transaction để kiểm thử.
+
+Khi chương trình được chạy trên toàn SoC, RTG không chỉ kiểm tra ALU. Các instruction
+khác nhau tạo ra hoạt động ở nhiều khối:
+
+```text
+instruction fetch → I-cache → AXI read → memory
+load/store        → D-cache → AXI read/write → memory
+add/sub           → ALU + register file
+branch/jump       → branch unit + PC update
+exception/CSR     → trap and privilege logic
+```
+
+Do đó một test end-to-end của `riscv-dv` có thể đi qua core, cache, AXI và memory.
+Tuy nhiên, việc một khối được đi qua không có nghĩa là mọi corner case của khối đó
+đã được bao phủ.
 
 ## 5. Các phần cần tự xây dựng
 
@@ -216,7 +237,34 @@ assert actual.memory == expected.memory
 assert actual.exception == expected.exception
 ```
 
-## 7. Kiểm tra AXI, cache và hệ thống
+### Bước 7: Kiểm tra hoạt động trung gian
+
+Ngoài trạng thái cuối, testbench nên thu trace của:
+
+- AXI read/write: địa chỉ, dữ liệu, burst, response và thứ tự transaction.
+- I-cache/D-cache: hit, miss, refill, eviction và write-back.
+- Commit/retire: PC, opcode, register write-back và trap.
+
+Nhờ vậy có thể phân biệt lỗi architectural của core với lỗi ở cache, AXI hoặc memory.
+
+## 7. Nạp chương trình và đường đi thực tế
+
+Có hai giai đoạn khác nhau:
+
+```text
+Giai đoạn chuẩn bị:
+    Cocotb → ghi trực tiếp AXI RAM/memory model → program đã nằm trong memory
+
+Giai đoạn thực thi:
+    Core → I-cache/D-cache → AXI → memory
+```
+
+Việc Cocotb ghi trực tiếp vào memory lúc khởi tạo thường bypass cache vì CPU chưa
+chạy. Điều đó không làm mất kiểm tra cache: khi CPU fetch instruction hoặc thực hiện
+load/store, các request vẫn đi qua cache và AXI. Nếu cần kiểm tra boot loader hoặc DMA,
+hãy tạo test để dữ liệu được nạp bởi một AXI master thực tế thay vì ghi trực tiếp.
+
+## 8. Kiểm tra AXI, cache và hệ thống
 
 ### AXI protocol
 
@@ -250,7 +298,85 @@ assert actual.exception == expected.exception
 - Reset đưa hệ thống về trạng thái hợp lệ.
 - Không transaction treo vô hạn.
 
-## 8. Cấu trúc thư mục đề xuất
+## 9. Random hóa môi trường SoC
+
+`riscv-dv` random hóa chủ yếu instruction và memory access pattern. Cocotb và memory
+model phải random hóa điều kiện môi trường để stress các khối khác:
+
+- Độ trễ memory.
+- AXI `READY` delay và back-pressure.
+- Độ trễ hoặc thứ tự response hợp lệ.
+- Burst length và byte enable.
+- Error response.
+- Thời điểm interrupt.
+- Reset trong hoặc gần một transaction.
+
+Ví dụ cùng một program có thể chạy nhiều lần với các seed môi trường khác nhau:
+
+```text
+program seed = 100
+AXI latency seed = 1  → run A
+AXI latency seed = 2  → run B
+AXI latency seed = 3  → run C
+```
+
+Mỗi lần chạy phải lưu cả instruction seed và environment seed để tái hiện lỗi.
+
+## 10. Directed tests cho corner case
+
+Random instruction testing là xương sống của flow, nhưng không đủ để đảm bảo các trạng
+thái hiếm. Nên có các nhóm test định hướng:
+
+| Nhóm | Ví dụ |
+|---|---|
+| Core/ISA | Branch taken/not-taken, CSR, illegal instruction, exception |
+| I-cache | Sequential fetch, jump xa, conflict address, refill |
+| D-cache | Hit, miss, dirty eviction, write-back, invalidate |
+| AXI | Burst, wait-state, back-pressure kéo dài, response lỗi |
+| Memory | Byte enable, boundary, alignment, vùng địa chỉ lỗi |
+| Arbitration | Hai master cùng request, fairness, starvation |
+| System | Interrupt trong lúc stall, DMA/cache interaction, reset giữa transaction |
+
+Các test này có thể là assembly/C cố định hoặc generator có constraint. Không cần một
+file duy nhất; nên chia thành nhiều test dùng chung infrastructure của Cocotb.
+
+Ví dụ ép cache conflict:
+
+```asm
+store x1, 0x0000(x0)
+store x2, 0x1000(x0)
+load  x3, 0x0000(x0)
+```
+
+Sau đó scoreboard kiểm tra kết quả dữ liệu, còn cache monitor kiểm tra miss/refill/eviction.
+
+## 11. Các lớp kiểm thử
+
+### End-to-end random
+
+```text
+riscv-dv → program → toàn bộ SoC → Spike/Sail scoreboard
+```
+
+Kiểm tra hành vi kiến trúc và các hoạt động phát sinh tự nhiên của core, cache, AXI
+và memory.
+
+### Monitor/scoreboard trung gian
+
+Trong cùng test end-to-end, monitor kiểm tra transaction và event ở giữa đường đi:
+AXI ordering, response, cache event, memory write và commit trace.
+
+### Directed component tests
+
+Ép các corner case mà random program khó tạo ra, đặc biệt cho cache, AXI, arbitration,
+interrupt, reset và peripheral.
+
+### Formal checks
+
+`riscv-formal` bổ sung kiểm tra từng instruction và invariant qua RVFI. Formal không
+thay thế random simulation, nhưng bắt được nhiều trường hợp mà random khó gặp.
+
+## 12. Cấu trúc thư mục đề xuất
 
 ```text
 riscv-verification/
@@ -275,6 +401,12 @@ riscv-verification/
 │   ├── axi_assertions.sv
 │   ├── cache_assertions.sv
 │   └── cpu_assertions.sv
+├── directed/
+│   ├── core/
+│   ├── cache/
+│   ├── axi/
+│   ├── memory/
+│   └── soc/
 ├── programs/
 │   ├── linker.ld
 │   └── startup.S
@@ -287,7 +419,34 @@ riscv-verification/
     └── expected/
 ```
 
-## 9. Lộ trình triển khai
+## 12.1. Bộ công cụ bổ trợ cho `riscv-dv`
+
+| Mục tiêu | Công cụ nên dùng |
+|---|---|
+| Random instruction/program | `riscv-dv` hoặc RTG riêng |
+| ISA reference | Spike; Sail để cross-check khi cần |
+| ISA compliance | `riscv-arch-test` |
+| Trace/ISA coverage | `riscv-isac` hoặc `riscv-coverage` |
+| AXI Cocotb driver/monitor | `cocotbext-axi` |
+| AXI RTL component/reference | `verilog-axi` |
+| Instruction/invariant formal | `riscv-formal` |
+| RTL simulator | `cocotb-vivado` + Vivado XSim |
+
+Stack khuyến nghị:
+
+```text
+ultraembedded/riscv          = RTL DUT
+cocotb-vivado + XSim         = simulator
+riscv-dv                    = random program
+Spike/Sail                   = architectural reference
+riscv-arch-test              = directed ISA compliance
+cocotbext-axi                = AXI driver/monitor
+verilog-axi                  = AXI RTL components
+riscv-isac/riscv-coverage    = coverage
+riscv-formal                 = formal checks
+```
+
+## 13. Lộ trình triển khai
 
 ### Giai đoạn 1: RTL smoke test
 
@@ -315,13 +474,24 @@ Kiểm tra hit, miss, refill, eviction, write-back/write-through và memory cons
 
 ### Giai đoạn 6: Random regression
 
-Tích hợp `riscv-dv` hoặc RTG riêng, chạy nhiều seed, random latency, random back-pressure và timeout.
+Tích hợp `riscv-dv` hoặc RTG riêng, chạy nhiều instruction seed và environment seed,
+random latency, random back-pressure, AXI monitor, cache monitor, timeout và coverage.
+
+### Giai đoạn 6.1: Directed corner cases
+
+Thêm các test định hướng cho cache conflict/eviction, dirty write-back, AXI burst,
+back-pressure, error response, unaligned/boundary access, interrupt, DMA và reset.
+
+### Giai đoạn 6.2: Coverage và formal
+
+Đo ISA/functional coverage bằng `riscv-isac` hoặc `riscv-coverage`, chạy `riscv-arch-test`
+cho compliance và thêm `riscv-formal` cho instruction/invariant checking.
 
 ### Giai đoạn 7: RV64/SoC lớn
 
 Mở rộng sang RV64, privilege mode, MMU/TLB, interrupt, DMA, peripheral và Linux/bare-metal boot.
 
-## 10. Kết luận
+## 14. Kết luận
 
 Mô hình chính xác là:
 
@@ -337,3 +507,24 @@ Regression        = chạy nhiều seed và lưu kết quả
 ```
 
 Các dự án mã nguồn mở cung cấp nền tảng, nhưng lớp tích hợp vẫn phải được xây dựng: testbench Cocotb, memory model, adapter Spike/Sail, state collector, scoreboard, assertions và regression manager.
+
+`riscv-dv` có thể dùng để kiểm thử end-to-end toàn SoC, nhưng không tự bao phủ mọi
+corner case của cache, AXI, memory và peripheral. Flow hoàn chỉnh cần kết hợp:
+
+```text
+riscv-dv/RTG
+    + Spike/Sail
+    + Cocotb-vivado/XSim
+    + random AXI/memory environment
+    + AXI/cache monitors
+    + assertions
+    + directed corner-case tests
+    + coverage
+    + formal verification
+```
+
+Nói ngắn gọn:
+
+> RTG tạo hoạt động của CPU; Cocotb tạo điều kiện môi trường; monitor và assertion
+> kiểm tra đường đi; Spike/Sail kiểm tra kết quả kiến trúc; directed tests ép corner
+> case; coverage và formal giúp đánh giá mức độ đầy đủ của verification.
