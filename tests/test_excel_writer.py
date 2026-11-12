@@ -60,3 +60,40 @@ def test_write_workbook_creates_table_sheet(tmp_path: Path) -> None:
     ws = wb[table_sheets[0]]
     assert ws["A1"].value == "A"
     assert ws["B2"].value == "2"
+
+
+def test_formula_like_text_is_not_stored_as_formula(tmp_path: Path) -> None:
+    pages = [
+        {
+            "source": "demo.png",
+            "page_number": 1,
+            "width": 10,
+            "height": 10,
+            "text": "=1+1",
+            "layouts": [],
+            "tables": [
+                {
+                    "index": 1,
+                    "score": 0.9,
+                    "rows": 1,
+                    "cols": 1,
+                    "grid": [["=SUM(A1:A2)", "+123", "-45", "@cmd"]],
+                    "html": None,
+                    "cells": [],
+                }
+            ],
+        }
+    ]
+    out = write_workbook(pages, tmp_path / "formula.xlsx")
+    from openpyxl import load_workbook
+
+    wb = load_workbook(out)
+    ws_text = wb["Text"]
+    assert ws_text["C2"].value == "=1+1"
+    assert ws_text["C2"].data_type == "s"
+    ws_t = wb[[n for n in wb.sheetnames if n.startswith("T1_")][0]]
+    assert ws_t["A1"].value == "=SUM(A1:A2)"
+    assert ws_t["A1"].data_type == "s"
+    assert ws_t["B1"].value == "+123"
+    assert ws_t["C1"].value == "-45"
+    assert ws_t["D1"].value == "@cmd"

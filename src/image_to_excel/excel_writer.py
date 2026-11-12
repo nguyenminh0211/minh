@@ -22,6 +22,17 @@ _THIN = Border(
 )
 _WRAP = Alignment(wrap_text=True, vertical="top")
 
+# openpyxl marks values starting with "=" as formulas (data_type "f").
+# Force those OCR literals back to plain text so Excel shows the original string.
+_FORMULA_LIKE_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _set_cell_value(cell, value: Any) -> None:
+    """Write a cell value without allowing formula interpretation."""
+    cell.value = value
+    if isinstance(value, str) and value.startswith(_FORMULA_LIKE_PREFIXES):
+        cell.data_type = "s"
+
 
 def _autosize(ws, max_width: int = 48) -> None:
     for col in ws.columns:
@@ -45,7 +56,8 @@ def _style_header_row(ws, row_idx: int = 1) -> None:
 def _write_dataframe(ws, df: pd.DataFrame, *, header: bool = True) -> None:
     for r_idx, row in enumerate(dataframe_to_rows(df, index=False, header=header), start=1):
         for c_idx, value in enumerate(row, start=1):
-            cell = ws.cell(row=r_idx, column=c_idx, value=value)
+            cell = ws.cell(row=r_idx, column=c_idx)
+            _set_cell_value(cell, value)
             cell.alignment = _WRAP
             cell.border = _THIN
     if header and len(df.columns):
@@ -56,7 +68,8 @@ def _write_dataframe(ws, df: pd.DataFrame, *, header: bool = True) -> None:
 def _write_grid(ws, grid: list[list[Any]], *, treat_first_as_header: bool = True) -> None:
     for r_idx, row in enumerate(grid, start=1):
         for c_idx, value in enumerate(row, start=1):
-            cell = ws.cell(row=r_idx, column=c_idx, value=value)
+            cell = ws.cell(row=r_idx, column=c_idx)
+            _set_cell_value(cell, value)
             cell.alignment = _WRAP
             cell.border = _THIN
     if treat_first_as_header and grid:
